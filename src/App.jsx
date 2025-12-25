@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useReducer } from 'react';
 import { Heart, Utensils, Moon, Sun, RotateCcw, Play, Trophy, Zap, Activity, AlertTriangle } from 'lucide-react';
 
 /**
@@ -91,31 +91,183 @@ const PixelCavapoo = ({ animation, isDead, stats, isSleeping }) => {
   );
 };
 
+// Initial state for the pet
+const initialState = {
+  hunger: 80,
+  happiness: 80,
+  energy: 100,
+  health: 100,
+  age: 0,
+  ticks: 0,
+  lastPlayTime: 0,
+  lastFeedTime: 0,
+  isSleeping: false,
+  isDead: false,
+  status: 'idle'
+};
+
+// Helper to clamp values between 0 and 100
+const clamp = (val, min = 0, max = 100) => Math.min(max, Math.max(min, val));
+
+// Reducer handles all state transitions with full access to current state
+function petReducer(state, action) {
+  if (state.isDead && action.type !== 'RESET') {
+    return state;
+  }
+
+  switch (action.type) {
+    case 'TICK': {
+      const { hunger, happiness, energy, health, age, ticks, lastPlayTime, isSleeping } = state;
+      const nextTick = ticks + 1;
+      const newAge = nextTick % 60 === 0 ? age + 1 : age;
+
+      // Age difficulty multiplier (1.0 to 2.0)
+      const ageMult = 1 + (Math.min(age, 10) / 10);
+
+      // Boredom factor: happiness decays faster without interaction
+      const ticksSincePlay = nextTick - lastPlayTime;
+      const boredomFactor = Math.min(2, 1 + (ticksSincePlay / 120)); // Max 2x after 2 mins
+
+      // === ENERGY ===
+      let newEnergy = energy;
+      if (isSleeping) {
+        // Sleep quality affected by hunger
+        const sleepQuality = hunger > 30 ? 1 : 0.5;
+        newEnergy += 2.5 * sleepQuality;
+      } else {
+        // Base drain + hunger affects energy
+        let drain = 0.3;
+        if (hunger < 40) drain += 0.2; // Low fuel = tired faster
+        if (happiness > 70) drain += 0.1; // Happy pets are more active
+        newEnergy -= drain;
+      }
+      newEnergy = clamp(newEnergy);
+
+      // === HUNGER ===
+      let hungerDecay = isSleeping ? 0.15 : 0.35;
+      // Metabolism effects
+      if (energy > 70) hungerDecay += 0.1; // High energy = faster metabolism
+      if (energy <= 0) hungerDecay *= 1.3; // Exhaustion burns reserves
+      if (happiness > 60 && !isSleeping) hungerDecay += 0.05; // Active happy pet
+      const newHunger = clamp(hunger - (hungerDecay * ageMult));
+
+      // === HAPPINESS ===
+      let happinessChange = 0;
+      // Boredom is the baseline decay
+      happinessChange -= 0.2 * boredomFactor;
+      // Hunger affects mood
+      if (hunger < 20) {
+        happinessChange -= 0.4; // Hungry = unhappy
+      } else if (hunger > 70) {
+        happinessChange += 0.15; // Well-fed = content
+      }
+      // Energy affects mood
+      if (energy <= 0) {
+        happinessChange -= 0.4; // Exhausted = miserable
+      } else if (energy > 60 && !isSleeping) {
+        happinessChange += 0.1; // Energetic = happier
+      }
+      // Sleeping too long makes pet bored
+      if (isSleeping && energy > 80) {
+        happinessChange -= 0.15;
+      }
+      // Poor health makes pet sad
+      if (health < 50) {
+        happinessChange -= 0.2;
+      }
+      // Age multiplier on negative changes only
+      if (happinessChange < 0) {
+        happinessChange *= ageMult;
+      }
+      const newHappiness = clamp(happiness + happinessChange);
+
+      // === HEALTH ===
+      // Overall wellbeing score determines health trajectory
+      const wellbeing = (hunger + happiness + energy) / 3;
+      let healthChange = 0;
+
+      // Gradual response to care quality
+      if (wellbeing > 70) {
+        healthChange = 0.15; // Good care
+      } else if (wellbeing > 50) {
+        healthChange = 0.05; // Adequate
+      } else if (wellbeing > 30) {
+        healthChange = -0.1; // Poor care
+      } else {
+        healthChange = -0.3; // Neglect
+      }
+
+      // Critical conditions
+      if (hunger <= 0) healthChange -= 1.2; // Starving
+      if (energy <= 0 && !isSleeping) healthChange -= 0.4; // Exhausted
+      if (happiness <= 0) healthChange -= 0.25; // Depressed
+
+      // Thriving bonus
+      if (hunger > 85 && happiness > 85 && energy > 70) {
+        healthChange += 0.2;
+      }
+
+      const newHealth = clamp(health + healthChange);
+      const newIsDead = newHealth <= 0;
+
+      return {
+        ...state,
+        hunger: newHunger,
+        happiness: newHappiness,
+        energy: newEnergy,
+        health: newHealth,
+        age: newAge,
+        ticks: nextTick,
+        isDead: newIsDead,
+        status: newIsDead ? 'dead' : state.status
+      };
+    }
+
+    case 'FEED':
+      if (state.isSleeping) return state;
+      return {
+        ...state,
+        hunger: clamp(state.hunger + 25),
+        health: clamp(state.health + 2),
+        happiness: clamp(state.happiness + 3), // Small mood boost from being fed
+        lastFeedTime: state.ticks,
+        status: 'eating'
+      };
+
+    case 'PLAY':
+      if (state.isSleeping || state.energy < 15) return state;
+      return {
+        ...state,
+        happiness: clamp(state.happiness + 20),
+        energy: clamp(state.energy - 15),
+        hunger: clamp(state.hunger - 5), // Playing burns calories
+        lastPlayTime: state.ticks,
+        status: 'playing'
+      };
+
+    case 'TOGGLE_SLEEP':
+      return {
+        ...state,
+        isSleeping: !state.isSleeping,
+        status: !state.isSleeping ? 'sleeping' : 'idle'
+      };
+
+    case 'SET_STATUS':
+      return { ...state, status: action.status };
+
+    case 'RESET':
+      return { ...initialState };
+
+    default:
+      return state;
+  }
+}
+
 const App = () => {
-  const [hunger, setHunger] = useState(80);
-  const [happiness, setHappiness] = useState(80);
-  const [energy, setEnergy] = useState(100);
-  const [health, setHealth] = useState(100);
-  const [age, setAge] = useState(0);
-  const [isDead, setIsDead] = useState(false);
-  const [isSleeping, setIsSleeping] = useState(false);
-  const [status, setStatus] = useState('idle');
-  const [ticks, setTicks] = useState(0);
+  const [state, dispatch] = useReducer(petReducer, initialState);
+  const { hunger, happiness, energy, health, age, isDead, isSleeping, status } = state;
 
   const statusTimer = useRef(null);
-
-  // Use refs to track current values for cross-state calculations
-  const statsRef = useRef({ hunger, happiness, energy, health, age });
-  const sleepingRef = useRef(isSleeping);
-
-  // Keep refs in sync with state
-  useEffect(() => {
-    statsRef.current = { hunger, happiness, energy, health, age };
-  }, [hunger, happiness, energy, health, age]);
-
-  useEffect(() => {
-    sleepingRef.current = isSleeping;
-  }, [isSleeping]);
 
   // Cleanup status timer on unmount
   useEffect(() => {
@@ -124,80 +276,29 @@ const App = () => {
     };
   }, []);
 
-  // Core Simulation Loop - only depends on isDead
+  // Core Simulation Loop
   useEffect(() => {
     if (isDead) return;
 
     const interval = setInterval(() => {
-      const sleeping = sleepingRef.current;
-      const stats = statsRef.current;
-
-      setTicks(t => {
-        const next = t + 1;
-        if (next % 60 === 0) setAge(a => a + 1);
-        return next;
-      });
-
-      // Difficulty Multiplier based on Age (min 1, max 2)
-      const ageMult = 1 + (Math.min(stats.age, 10) / 10);
-
-      setEnergy(e => {
-        if (sleeping) return Math.min(100, e + 3);
-        return Math.max(0, e - 0.25);
-      });
-
-      setHunger(h => {
-        let decay = sleeping ? 0.1 : 0.4;
-        if (stats.energy <= 0) decay *= 1.5; // Exhaustion burns hunger faster
-        return Math.max(0, h - (decay * ageMult));
-      });
-
-      setHappiness(hap => {
-        let decay = 0.3;
-        if (stats.hunger < 20) decay += 0.5;
-        if (stats.energy <= 0) decay += 0.5;
-        return Math.max(0, hap - (decay * ageMult));
-      });
-
-      setHealth(hlt => {
-        let change = 0;
-        // Natural recovery if very happy and full
-        if (stats.hunger > 80 && stats.happiness > 80 && stats.energy > 50) change = 0.2;
-
-        // Damage conditions
-        if (stats.hunger <= 0) change -= 1.5;
-        if (stats.energy <= 0 && !sleeping) change -= 0.5;
-        if (stats.happiness <= 0) change -= 0.3;
-
-        return Math.min(100, Math.max(0, hlt + change));
-      });
-
+      dispatch({ type: 'TICK' });
     }, 1000);
 
     return () => clearInterval(interval);
   }, [isDead]);
 
-  // Death Logic
-  useEffect(() => {
-    if (health <= 0) {
-      setIsDead(true);
-      setStatus('dead');
-    }
-  }, [health]);
-
   const setPetStatus = (newStatus, duration = 2000) => {
     if (statusTimer.current) clearTimeout(statusTimer.current);
-    setStatus(newStatus);
+    dispatch({ type: 'SET_STATUS', status: newStatus });
     statusTimer.current = setTimeout(() => {
-      setStatus(sleepingRef.current ? 'sleeping' : 'idle');
+      dispatch({ type: 'SET_STATUS', status: isSleeping ? 'sleeping' : 'idle' });
     }, duration);
   };
 
   const handleAction = (type) => {
     if (isDead) {
       if (type === 'reset') {
-        setHunger(80); setHappiness(80); setEnergy(100); setHealth(100); setAge(0);
-        setIsDead(false); setIsSleeping(false); setStatus('idle'); setTicks(0);
+        dispatch({ type: 'RESET' });
       }
       return;
     }
@@ -206,27 +307,19 @@ const App = () => {
 
     switch (type) {
       case 'feed':
-        setHunger(h => Math.min(100, h + 25));
-        setHealth(h => Math.min(100, h + 2)); // Feeding slightly helps health
+        dispatch({ type: 'FEED' });
         setPetStatus('eating');
         break;
       case 'play':
-        // Use ref for current energy value
-        if (statsRef.current.energy < 15) {
-          setPetStatus('idle'); // Too tired to play
-          return;
-        }
-        setHappiness(h => Math.min(100, h + 20));
-        setEnergy(e => Math.max(0, e - 15));
+        if (energy < 15) return;
+        dispatch({ type: 'PLAY' });
         setPetStatus('playing');
         break;
       case 'sleep':
-        setIsSleeping(!isSleeping);
-        setStatus(!isSleeping ? 'sleeping' : 'idle');
+        dispatch({ type: 'TOGGLE_SLEEP' });
         break;
       case 'reset':
-        setHunger(80); setHappiness(80); setEnergy(100); setHealth(100); setAge(0);
-        setIsDead(false); setIsSleeping(false); setStatus('idle'); setTicks(0);
+        dispatch({ type: 'RESET' });
         break;
     }
   };
@@ -361,8 +454,8 @@ const App = () => {
       <div className="mt-8 flex flex-col items-center gap-1">
         <div className="text-zinc-400 text-[10px] uppercase font-bold tracking-widest">Care Guide</div>
         <p className="text-zinc-400 text-[9px] max-w-[280px] text-center leading-relaxed">
-          Zero Energy (NRG) causes exhaustion, doubling Hunger and Happiness decay.
-          If Hunger hits zero, Health (HLT) starts to drain. Restore Health by keeping all stats above 80%.
+          Stats are interconnected: Hunger affects Energy, Energy affects Happiness, and overall wellbeing determines Health.
+          Play regularly to prevent boredom. Don't over-sleep - your pet wants activity! Keep all stats balanced for a thriving pet.
         </p>
       </div>
     </div>
