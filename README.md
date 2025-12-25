@@ -1,0 +1,2 @@
+# Cavagotchi
+A Cavapoo simulator.
